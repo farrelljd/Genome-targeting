@@ -1,23 +1,36 @@
-import warnings
+import dataclasses
+import re
 
 import numpy as np
 from joblib import Memory
 
-from .utils import transcribe, most_common
+from .utils import transcribe, most_common, get_substrings
 
 location = './cachedir'
 memory = Memory(location, verbose=0)
 
+INVALID_REGEX = re.compile(r'''
+(?P<invalid>[^ACGTRYMKSWHBVDN])
+''', re.X)
+UNCERTAIN_REGEX = re.compile(r'''
+(?P<uncertain>[RYMKSWHBVDN])
+''', re.X)
 
+
+@dataclasses.dataclass
 class Genome:
-    def __init__(self, genome_str, name):
-        self.string = genome_str
-        self.name = name
+    string: str = dataclasses.field(repr=False)
+    name: str
+    description: str = ""
+    segment: int = 0
+    substitution: int = 0
 
     @classmethod
     def read(cls, gen_file, filetype=None):
         readers = {'gen': cls.read_gen,
-                   'gb': cls.read_genbank}
+                   'gb': cls.read_genbank,
+                   'fasta': cls.read_fasta,
+                   'fna': cls.read_fasta}
         if filetype is None:
             filetype = gen_file.strip().split('.')[-1]
         try:
@@ -35,7 +48,6 @@ class Genome:
     @classmethod
     def read_genbank(cls, genbank_file, name=None):
         with open(genbank_file, 'r') as f:
-            errors = 0
             line = "\n"
             genome_str = ""
             while f.readline():
@@ -43,18 +55,27 @@ class Genome:
                     line = f.readline()
                 line = f.readline()
                 while line.strip() != "//":
-                    if set('rymkswhbvdn').intersection(line.lower()):
-                        errors += 1
                     genome_str += "".join(line.strip().split()[1:]).upper()
                     line = f.readline()
                 f.readline()
                 genome_str += '\n'
-        if errors:
-            warnings.warn(f"found {errors} lines with uncertain bases", RuntimeWarning, stacklevel=2)
         genome_str = genome_str.strip()
         if name is None:
             name = genbank_file.split('/')[-1].split('.')[0]
         return Genome(genome_str, name)
+
+    @classmethod
+    def read_fasta(cls, gen_file, name=None):
+        blocks = "".join(open(gen_file, 'r').readlines()).split(">")[1:]
+        if len(blocks) > 1:
+            print("multiple entries found. choosing the first entry.")
+        lines = blocks[0].splitlines()
+        genome_str = "".join(line.strip().upper() for line in lines[1:])
+        description = f'{lines[0].strip()}'
+        if name is None:
+            name = description.split(" ")[0]
+        print(f"processed entry >{description}")
+        return Genome(genome_str, name, description)
 
     def __len__(self):
         return len(self.string.replace('\n', ''))
@@ -67,9 +88,6 @@ class Genome:
 
     def __getitem__(self, item):
         return self.string[item]
-
-    def __str__(self):
-        return f'{self.name}'
 
     def __eq__(self, other):
         return self.string == other.string
@@ -86,12 +104,10 @@ class Genome:
         _most_common = memory.cache(most_common)
         return _most_common(self, length, n)
 
-
-def main():
-    gen_file = '../genomes/rBS_QB928.gen'
-    reader = Genome.read_gen(gen_file)
-    reader.transcribe(10)
-
-
-if __name__ == '__main__':
-    main()
+    def substrings_iter(self, length: int):
+        for i, substring in enumerate(get_substrings(self.string, length)):
+            if isinstance(substring, str):
+                yield Genome(substring, self.name, self.description, segment=i, substitution=0)
+            else:
+                for j, ss in enumerate(substring):
+                    yield Genome(ss, self.name, self.description, segment=i, substitution=j)
